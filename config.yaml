@@ -1,0 +1,6 @@
+interval: 12
+rpcs:
+  - https://eth.drpc.org
+  - https://rpc.ankr.com/eth
+  - https://cloudflare-eth.com
+  - https://bsc-dataseed.bnbchain.org

@@ -1,0 +1,24 @@
+version: 2
+
+project_name: eth-watch
+
+builds:
+  - id: eth-watch
+    binary: eth-watch
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+# 不打 tar 包，每个构建产物为单个二进制直接上传
+archives:
+  - format: binary
+
+# owner/name 未填时使用 GITHUB_REPOSITORY（当前仓库）
+release:
+  draft: false
+  # 若需适配任意仓库，可改为不填 owner/name，由 CI 环境自动识别
