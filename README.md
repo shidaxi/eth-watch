@@ -2,7 +2,7 @@
 
 A terminal dashboard for monitoring multiple Ethereum (or EVM-compatible) RPC nodes in real time.
 
-![demo](https://raw.githubusercontent.com/shidaxi/eth-watch/main/assets/demo.png)
+![demo](assets/demo.gif)
 
 ## Features
 
