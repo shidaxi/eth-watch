@@ -20,7 +20,7 @@ type column struct {
 
 var columns = []column{
 	{name: "URL", width: 30},
-	{name: "ChainID", width: 9},
+	{name: "ChainID", width: 13},
 	{name: "Latest", width: 14},
 	{name: "Hash", width: 13},
 	{name: "Safe", width: 14},
