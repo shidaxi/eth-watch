@@ -54,6 +54,16 @@ const (
 	colUpdated   = 9
 )
 
+type displayMode int
+
+const (
+	modeWide   displayMode = iota
+	modeSimple
+)
+
+// simpleColMap maps simple-mode column positions to the global column constants.
+var simpleColMap = []int{colURL, colLatest, colHash}
+
 type model struct {
 	nodes      []NodeInfo
 	sortCol    int
@@ -64,8 +74,11 @@ type model struct {
 	width      int
 	height     int
 
+	// Display mode
+	dispMode displayMode
+
 	// K8s mode
-	inK8s      bool
+	inK8s       bool
 	discovering bool
 	discoverErr string
 
@@ -73,6 +86,10 @@ type model struct {
 	filterMode bool
 	filterStr  string
 	filterRe   *regexp.Regexp
+
+	// Pagination
+	page     int
+	pageSize int
 
 	// Quit confirmation
 	escPending bool
@@ -106,6 +123,9 @@ func newModel(rpcs []string, interval time.Duration, inK8s bool) model {
 		rpcs:     rpcs,
 		width:    120,
 		inK8s:    inK8s,
+		page:     0,
+		pageSize: 20,
+		dispMode: modeWide,
 	}
 }
 
@@ -164,8 +184,8 @@ func tick(d time.Duration) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// ctrl+c / q always quits
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		// ctrl+c always quits regardless of mode
+		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
 
@@ -179,24 +199,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "q":
+			return m, tea.Quit
 		case "esc":
 			if m.filterStr != "" || m.filterRe != nil {
-				// First esc: clear active filter
 				m.filterStr = ""
 				m.filterRe = nil
+				m.page = 0
 				m.escPending = true
 			} else if m.escPending {
-				// Second consecutive esc: quit
 				return m, tea.Quit
 			} else {
 				m.escPending = true
 			}
 		case "left", "h":
-			if m.sortCol > 0 {
+			if m.dispMode == modeSimple {
+				m.prevSimpleCol()
+			} else if m.sortCol > 0 {
 				m.sortCol--
 			}
 		case "right", "l":
-			if m.sortCol < len(columns)-1 {
+			if m.dispMode == modeSimple {
+				m.nextSimpleCol()
+			} else if m.sortCol < len(columns)-1 {
 				m.sortCol++
 			}
 		case "a":
@@ -207,16 +232,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sortAsc = !m.sortAsc
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			idx := int(msg.String()[0] - '1')
-			if idx < len(columns) {
-				if m.sortCol == idx {
-					m.sortAsc = !m.sortAsc
-				} else {
-					m.sortCol = idx
+			if m.dispMode == modeSimple {
+				if idx < len(simpleColMap) {
+					col := simpleColMap[idx]
+					if m.sortCol == col {
+						m.sortAsc = !m.sortAsc
+					} else {
+						m.sortCol = col
+					}
+				}
+			} else {
+				if idx < len(columns) {
+					if m.sortCol == idx {
+						m.sortAsc = !m.sortAsc
+					} else {
+						m.sortCol = idx
+					}
 				}
 			}
 		case "/":
 			m.filterMode = true
 			return m, nil
+		case "pgdown":
+			m.nextPage()
+		case "pgup":
+			m.prevPage()
+		case ",":
+			if m.dispMode == modeWide {
+				m.dispMode = modeSimple
+				// Clamp sortCol to simple columns
+				if !isSimpleCol(m.sortCol) {
+					m.sortCol = colLatest
+				}
+			} else {
+				m.dispMode = modeWide
+			}
 		}
 		m.sortNodes()
 
@@ -272,6 +322,7 @@ func (m model) updateFilterMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.filterMode = false
 		m.escPending = false
+		m.page = 0
 		if m.filterStr == "" {
 			m.filterRe = nil
 		} else {
@@ -282,24 +333,25 @@ func (m model) updateFilterMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		if m.escPending {
-			// Second esc: quit
 			return m, tea.Quit
 		}
-		// First esc: exit filter input, keep or clear filter
 		m.filterMode = false
 		m.filterStr = ""
 		m.filterRe = nil
+		m.page = 0
 		m.escPending = true
 	case "backspace", "ctrl+h":
 		m.escPending = false
 		if len(m.filterStr) > 0 {
 			m.filterStr = m.filterStr[:len(m.filterStr)-1]
 		}
+		m.page = 0
 		m.updateLiveFilter()
 	default:
 		m.escPending = false
 		if len(msg.String()) == 1 {
 			m.filterStr += msg.String()
+			m.page = 0
 			m.updateLiveFilter()
 		}
 	}
@@ -353,8 +405,27 @@ func (m *model) sortNodes() {
 	})
 }
 
-// visibleNodes returns nodes after applying the current filter.
+// visibleNodes returns the filtered nodes for the current page.
 func (m *model) visibleNodes() []NodeInfo {
+	all := m.filteredNodes()
+	total := len(all)
+	if total == 0 {
+		return nil
+	}
+	start := m.page * m.pageSize
+	if start >= total {
+		start = 0
+		m.page = 0
+	}
+	end := start + m.pageSize
+	if end > total {
+		end = total
+	}
+	return all[start:end]
+}
+
+// filteredNodes returns all nodes after applying the regex filter (no paging).
+func (m *model) filteredNodes() []NodeInfo {
 	if m.filterRe == nil {
 		return m.nodes
 	}
@@ -365,6 +436,81 @@ func (m *model) visibleNodes() []NodeInfo {
 		}
 	}
 	return out
+}
+
+func (m *model) totalPages() int {
+	total := len(m.filteredNodes())
+	if total == 0 {
+		return 1
+	}
+	pages := total / m.pageSize
+	if total%m.pageSize != 0 {
+		pages++
+	}
+	return pages
+}
+
+func (m *model) nextPage() {
+	if m.page < m.totalPages()-1 {
+		m.page++
+	}
+}
+
+func (m *model) prevPage() {
+	if m.page > 0 {
+		m.page--
+	}
+}
+
+func isSimpleCol(col int) bool {
+	for _, c := range simpleColMap {
+		if c == col {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) simpleColIndex() int {
+	for i, c := range simpleColMap {
+		if c == m.sortCol {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m *model) nextSimpleCol() {
+	idx := m.simpleColIndex()
+	if idx < len(simpleColMap)-1 {
+		m.sortCol = simpleColMap[idx+1]
+	}
+}
+
+func (m *model) prevSimpleCol() {
+	idx := m.simpleColIndex()
+	if idx > 0 {
+		m.sortCol = simpleColMap[idx-1]
+	}
+}
+
+// simpleColumns returns the 3-column layout for simple mode with a
+// dynamically sized URL column wide enough for the longest URL.
+func (m *model) simpleColumns() []column {
+	urlWidth := 20
+	for _, n := range m.nodes {
+		if len(n.URL) > urlWidth {
+			urlWidth = len(n.URL)
+		}
+	}
+	if urlWidth > 100 {
+		urlWidth = 100
+	}
+	return []column{
+		{name: "URL", width: urlWidth},
+		{name: "Latest", width: 14},
+		{name: "Hash", width: 13},
+	}
 }
 
 func numStr(s string) int64 {
@@ -384,7 +530,11 @@ func (m model) View() string {
 	if m.inK8s {
 		title += " " + k8sBadgeStyle.Render("⎈ K8S")
 	}
-	title += helpStyle.Render("  ←/→ col  space/enter asc/desc  a=asc d=desc  1-9 col  / filter  esc×2/q quit")
+	modeName := "wide"
+	if m.dispMode == modeSimple {
+		modeName = "simple"
+	}
+	title += helpStyle.Render(fmt.Sprintf("  ←/→ col  space asc/desc  a/d  1-9 col  pgup/pgdn page  / filter  , mode(%s)  esc×2/q quit", modeName))
 	sb.WriteString(title + "\n")
 
 	// ── Status line ────────────────────────────────────────────────────────
@@ -401,8 +551,13 @@ func (m model) View() string {
 	filterInfo := ""
 	if m.filterRe != nil {
 		total := len(m.nodes)
-		shown := len(m.visibleNodes())
+		shown := len(m.filteredNodes())
 		filterInfo = fmt.Sprintf("  Filter: /%s/ (%d/%d)", m.filterStr, shown, total)
+	}
+	totalPages := m.totalPages()
+	pageInfo := ""
+	if totalPages > 1 {
+		pageInfo = fmt.Sprintf("  Page %d/%d  [/] prev/next", m.page+1, totalPages)
 	}
 	if !m.lastUpdate.IsZero() {
 		sb.WriteString(helpStyle.Render(fmt.Sprintf("Last update: %s  Interval: %s  Sort: %s %s",
@@ -410,7 +565,7 @@ func (m model) View() string {
 			m.interval.String(),
 			columns[m.sortCol].name,
 			sortDir,
-		)) + filterActiveStyle.Render(filterInfo) + status + "\n")
+		)) + filterActiveStyle.Render(filterInfo) + helpStyle.Render(pageInfo) + status + "\n")
 	} else {
 		sb.WriteString(status + "\n")
 	}
@@ -420,17 +575,31 @@ func (m model) View() string {
 	sb.WriteString("\n")
 
 	// ── Header row ─────────────────────────────────────────────────────────
+	var activeCols []column
+	var colIDs []int // global column IDs for active columns
+	if m.dispMode == modeSimple {
+		activeCols = m.simpleColumns()
+		colIDs = simpleColMap
+	} else {
+		activeCols = columns
+		colIDs = make([]int, len(columns))
+		for i := range columns {
+			colIDs[i] = i
+		}
+	}
+
 	var headerCells []string
-	for i, col := range columns {
+	for i, col := range activeCols {
+		globalID := colIDs[i]
 		label := col.name
-		if i == m.sortCol {
+		if globalID == m.sortCol {
 			arrow := " ↓"
 			if m.sortAsc {
 				arrow = " ↑"
 			}
 			label = label + arrow
 		}
-		if i == m.sortCol {
+		if globalID == m.sortCol {
 			headerCells = append(headerCells, selectedColStyle.Width(col.width).Render(label))
 		} else {
 			headerCells = append(headerCells, headerStyle.Width(col.width).Render(label))
@@ -438,23 +607,39 @@ func (m model) View() string {
 	}
 	sb.WriteString(strings.Join(headerCells, " ") + "\n")
 
-	divider := strings.Repeat("─", totalWidth())
-	sb.WriteString(helpStyle.Render(divider) + "\n")
+	tw := 0
+	for i, col := range activeCols {
+		tw += col.width
+		if i < len(activeCols)-1 {
+			tw++
+		}
+	}
+	sb.WriteString(helpStyle.Render(strings.Repeat("─", tw)) + "\n")
 
 	// ── Data rows ──────────────────────────────────────────────────────────
 	visible := m.visibleNodes()
 	for _, node := range visible {
-		cells := []string{
-			renderCell(truncate(node.URL, columns[colURL].width), columns[colURL].width, false, node.Error != ""),
-			renderCell(node.ChainID, columns[colChainID].width, false, node.Error != ""),
-			renderCell(node.LatestBlock, columns[colLatest].width, false, node.Error != ""),
-			renderCell(node.LatestHash, columns[colHash].width, false, node.Error != ""),
-			renderBlockWithDiff(node.SafeBlock, node.LatestBlock, columns[colSafe].width),
-			renderBlockWithDiff(node.FinalBlock, node.LatestBlock, columns[colFinalized].width),
-			renderSyncing(node.Syncing, columns[colSyncing].width),
-			renderCell(node.PeerCount, columns[colPeers].width, false, node.Error != ""),
-			renderCell(truncate(node.Version, columns[colVersion].width), columns[colVersion].width, false, false),
-			renderCell(formatUpdated(node.UpdatedAt), columns[colUpdated].width, false, false),
+		var cells []string
+		if m.dispMode == modeSimple {
+			scols := m.simpleColumns()
+			cells = []string{
+				renderCell(truncate(node.URL, scols[0].width), scols[0].width, false, node.Error != ""),
+				renderCell(node.LatestBlock, scols[1].width, false, node.Error != ""),
+				renderCell(node.LatestHash, scols[2].width, false, node.Error != ""),
+			}
+		} else {
+			cells = []string{
+				renderCell(truncate(node.URL, columns[colURL].width), columns[colURL].width, false, node.Error != ""),
+				renderCell(node.ChainID, columns[colChainID].width, false, node.Error != ""),
+				renderCell(node.LatestBlock, columns[colLatest].width, false, node.Error != ""),
+				renderCell(node.LatestHash, columns[colHash].width, false, node.Error != ""),
+				renderBlockWithDiff(node.SafeBlock, node.LatestBlock, columns[colSafe].width),
+				renderBlockWithDiff(node.FinalBlock, node.LatestBlock, columns[colFinalized].width),
+				renderSyncing(node.Syncing, columns[colSyncing].width),
+				renderCell(node.PeerCount, columns[colPeers].width, false, node.Error != ""),
+				renderCell(truncate(node.Version, columns[colVersion].width), columns[colVersion].width, false, false),
+				renderCell(formatUpdated(node.UpdatedAt), columns[colUpdated].width, false, false),
+			}
 		}
 		row := strings.Join(cells, " ")
 		if node.Error != "" {
@@ -473,7 +658,7 @@ func (m model) View() string {
 			hint = errorStyle.Render(" (invalid regex)")
 		} else if re != nil {
 			total := len(m.nodes)
-			shown := len(m.visibleNodes())
+			shown := len(m.filteredNodes())
 			hint = helpStyle.Render(fmt.Sprintf(" (%d/%d)", shown, total))
 		}
 		sb.WriteString("\n" + filterLabelStyle.Render("Filter /") +
