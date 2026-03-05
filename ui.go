@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +13,15 @@ import (
 
 type tickMsg time.Time
 type dataMsg []NodeInfo
+
+// k8sDiscoveringMsg is sent when K8s discovery starts.
+type k8sDiscoveringMsg struct{}
+
+// k8sDiscoveredMsg carries the live RPC URLs found by K8s discovery.
+type k8sDiscoveredMsg struct {
+	rpcs []string
+	err  error
+}
 
 type column struct {
 	name  string
@@ -53,6 +63,19 @@ type model struct {
 	lastUpdate time.Time
 	width      int
 	height     int
+
+	// K8s mode
+	inK8s      bool
+	discovering bool
+	discoverErr string
+
+	// Filter
+	filterMode bool
+	filterStr  string
+	filterRe   *regexp.Regexp
+
+	// Quit confirmation
+	escPending bool
 }
 
 var (
@@ -65,9 +88,12 @@ var (
 	syncingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	helpStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	k8sBadgeStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("27")).Padding(0, 1)
+	filterActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	filterLabelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
-func newModel(rpcs []string, interval time.Duration) model {
+func newModel(rpcs []string, interval time.Duration, inK8s bool) model {
 	nodes := make([]NodeInfo, len(rpcs))
 	for i, url := range rpcs {
 		nodes[i] = NodeInfo{URL: url, LatestBlock: "...", LatestHash: "...", SafeBlock: "...", FinalBlock: "...", Syncing: "...", Version: "...", PeerCount: "...", ChainID: "..."}
@@ -79,14 +105,33 @@ func newModel(rpcs []string, interval time.Duration) model {
 		interval: interval,
 		rpcs:     rpcs,
 		width:    120,
+		inK8s:    inK8s,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		fetchData(m.rpcs, m.interval),
-		tick(m.interval),
-	)
+	var cmds []tea.Cmd
+	if m.inK8s {
+		cmds = append(cmds, discoverK8sCmd())
+	}
+	if len(m.rpcs) > 0 {
+		cmds = append(cmds, fetchData(m.rpcs, m.interval), tick(m.interval))
+	}
+	return tea.Batch(cmds...)
+}
+
+func discoverK8sCmd() tea.Cmd {
+	return func() tea.Msg {
+		candidates, err := discoverK8sRPCCandidates()
+		if err != nil {
+			return k8sDiscoveredMsg{err: err}
+		}
+		if len(candidates) == 0 {
+			return k8sDiscoveredMsg{rpcs: nil}
+		}
+		live := probeRPCCandidates(candidates, 5*time.Second)
+		return k8sDiscoveredMsg{rpcs: live}
+	}
 }
 
 func fetchData(rpcs []string, timeout time.Duration) tea.Cmd {
@@ -119,9 +164,33 @@ func tick(d time.Duration) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		// ctrl+c / q always quits
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
 			return m, tea.Quit
+		}
+
+		if m.filterMode {
+			return m.updateFilterMode(msg)
+		}
+
+		// Reset esc-pending on any key other than esc
+		if msg.String() != "esc" {
+			m.escPending = false
+		}
+
+		switch msg.String() {
+		case "esc":
+			if m.filterStr != "" || m.filterRe != nil {
+				// First esc: clear active filter
+				m.filterStr = ""
+				m.filterRe = nil
+				m.escPending = true
+			} else if m.escPending {
+				// Second consecutive esc: quit
+				return m, tea.Quit
+			} else {
+				m.escPending = true
+			}
 		case "left", "h":
 			if m.sortCol > 0 {
 				m.sortCol--
@@ -145,22 +214,108 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sortCol = idx
 				}
 			}
+		case "/":
+			m.filterMode = true
+			return m, nil
 		}
 		m.sortNodes()
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
 	case dataMsg:
 		m.nodes = []NodeInfo(msg)
 		m.lastUpdate = time.Now()
 		m.sortNodes()
+
 	case tickMsg:
-		return m, tea.Batch(
-			fetchData(m.rpcs, m.interval),
-			tick(m.interval),
-		)
+		if len(m.rpcs) > 0 {
+			return m, tea.Batch(fetchData(m.rpcs, m.interval), tick(m.interval))
+		}
+		return m, tick(m.interval)
+
+	case k8sDiscoveredMsg:
+		m.discovering = false
+		if msg.err != nil {
+			m.discoverErr = msg.err.Error()
+			return m, nil
+		}
+		if len(msg.rpcs) > 0 {
+			// Merge with existing rpcs (deduplicate)
+			existing := make(map[string]bool, len(m.rpcs))
+			for _, r := range m.rpcs {
+				existing[r] = true
+			}
+			for _, r := range msg.rpcs {
+				if !existing[r] {
+					m.rpcs = append(m.rpcs, r)
+					m.nodes = append(m.nodes, NodeInfo{
+						URL: r, LatestBlock: "...", LatestHash: "...",
+						SafeBlock: "...", FinalBlock: "...", Syncing: "...",
+						Version: "...", PeerCount: "...", ChainID: "...",
+					})
+				}
+			}
+		}
+		if len(m.rpcs) > 0 {
+			return m, tea.Batch(fetchData(m.rpcs, m.interval), tick(m.interval))
+		}
 	}
 	return m, nil
+}
+
+func (m model) updateFilterMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "enter":
+		m.filterMode = false
+		m.escPending = false
+		if m.filterStr == "" {
+			m.filterRe = nil
+		} else {
+			re, err := regexp.Compile(m.filterStr)
+			if err == nil {
+				m.filterRe = re
+			}
+		}
+	case "esc":
+		if m.escPending {
+			// Second esc: quit
+			return m, tea.Quit
+		}
+		// First esc: exit filter input, keep or clear filter
+		m.filterMode = false
+		m.filterStr = ""
+		m.filterRe = nil
+		m.escPending = true
+	case "backspace", "ctrl+h":
+		m.escPending = false
+		if len(m.filterStr) > 0 {
+			m.filterStr = m.filterStr[:len(m.filterStr)-1]
+		}
+		m.updateLiveFilter()
+	default:
+		m.escPending = false
+		if len(msg.String()) == 1 {
+			m.filterStr += msg.String()
+			m.updateLiveFilter()
+		}
+	}
+	return m, nil
+}
+
+// updateLiveFilter compiles the current filter string for live preview.
+func (m *model) updateLiveFilter() {
+	if m.filterStr == "" {
+		m.filterRe = nil
+		return
+	}
+	re, err := regexp.Compile(m.filterStr)
+	if err == nil {
+		m.filterRe = re
+	}
 }
 
 func (m *model) sortNodes() {
@@ -198,6 +353,20 @@ func (m *model) sortNodes() {
 	})
 }
 
+// visibleNodes returns nodes after applying the current filter.
+func (m *model) visibleNodes() []NodeInfo {
+	if m.filterRe == nil {
+		return m.nodes
+	}
+	var out []NodeInfo
+	for _, n := range m.nodes {
+		if m.filterRe.MatchString(n.URL) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func numStr(s string) int64 {
 	if s == "" || s == "N/A" || s == "..." {
 		return -1
@@ -210,23 +379,47 @@ func numStr(s string) int64 {
 func (m model) View() string {
 	var sb strings.Builder
 
-	title := titleStyle.Render("eth-watch") + helpStyle.Render("  ←/→ select column  space/enter toggle asc/desc  a=asc d=desc  1-9 quick select  q quit")
+	// ── Title bar ──────────────────────────────────────────────────────────
+	title := titleStyle.Render("eth-watch")
+	if m.inK8s {
+		title += " " + k8sBadgeStyle.Render("⎈ K8S")
+	}
+	title += helpStyle.Render("  ←/→ col  space/enter asc/desc  a=asc d=desc  1-9 col  / filter  esc×2/q quit")
 	sb.WriteString(title + "\n")
 
+	// ── Status line ────────────────────────────────────────────────────────
 	sortDir := "↓"
 	if m.sortAsc {
 		sortDir = "↑"
 	}
+	status := ""
+	if m.discovering {
+		status = "  " + syncingStyle.Render("● discovering K8s services…")
+	} else if m.discoverErr != "" {
+		status = "  " + errorStyle.Render("K8s discovery error: "+m.discoverErr)
+	}
+	filterInfo := ""
+	if m.filterRe != nil {
+		total := len(m.nodes)
+		shown := len(m.visibleNodes())
+		filterInfo = fmt.Sprintf("  Filter: /%s/ (%d/%d)", m.filterStr, shown, total)
+	}
 	if !m.lastUpdate.IsZero() {
-		sb.WriteString(helpStyle.Render(fmt.Sprintf("Last update: %s  Interval: %s  Sorting by: %s %s",
+		sb.WriteString(helpStyle.Render(fmt.Sprintf("Last update: %s  Interval: %s  Sort: %s %s",
 			m.lastUpdate.Format("15:04:05"),
 			m.interval.String(),
 			columns[m.sortCol].name,
 			sortDir,
-		)) + "\n")
+		)) + filterActiveStyle.Render(filterInfo) + status + "\n")
+	} else {
+		sb.WriteString(status + "\n")
+	}
+	if m.escPending {
+		sb.WriteString(syncingStyle.Render("Press esc again to quit") + "\n")
 	}
 	sb.WriteString("\n")
 
+	// ── Header row ─────────────────────────────────────────────────────────
 	var headerCells []string
 	for i, col := range columns {
 		label := col.name
@@ -248,7 +441,9 @@ func (m model) View() string {
 	divider := strings.Repeat("─", totalWidth())
 	sb.WriteString(helpStyle.Render(divider) + "\n")
 
-	for _, node := range m.nodes {
+	// ── Data rows ──────────────────────────────────────────────────────────
+	visible := m.visibleNodes()
+	for _, node := range visible {
 		cells := []string{
 			renderCell(truncate(node.URL, columns[colURL].width), columns[colURL].width, false, node.Error != ""),
 			renderCell(node.ChainID, columns[colChainID].width, false, node.Error != ""),
@@ -267,6 +462,26 @@ func (m model) View() string {
 		} else {
 			sb.WriteString(row + "\n")
 		}
+	}
+
+	// ── Filter input bar ───────────────────────────────────────────────────
+	if m.filterMode {
+		cursor := "█"
+		re, err := regexp.Compile(m.filterStr)
+		var hint string
+		if m.filterStr != "" && err != nil {
+			hint = errorStyle.Render(" (invalid regex)")
+		} else if re != nil {
+			total := len(m.nodes)
+			shown := len(m.visibleNodes())
+			hint = helpStyle.Render(fmt.Sprintf(" (%d/%d)", shown, total))
+		}
+		sb.WriteString("\n" + filterLabelStyle.Render("Filter /") +
+			filterActiveStyle.Render(m.filterStr) +
+			filterActiveStyle.Render(cursor) +
+			filterLabelStyle.Render("/") +
+			hint +
+			helpStyle.Render("  enter=confirm  esc=clear") + "\n")
 	}
 
 	return sb.String()
@@ -294,7 +509,6 @@ func renderBlockWithDiff(val, latest string, width int) string {
 			trailing := strings.Repeat(" ", width-combinedLen)
 			return normalStyle.Render(val) + diffStyle.Render(diffStr) + trailing
 		}
-		// 截断 val 以留出差值显示空间
 		available := width - lipgloss.Width(diffStr)
 		if available < 1 {
 			return normalStyle.Width(width).Render(val)

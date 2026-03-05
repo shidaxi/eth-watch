@@ -11,6 +11,8 @@ A terminal dashboard for monitoring multiple Ethereum (or EVM-compatible) RPC no
 - **Per-column sorting** — sort by any column with `←`/`→` to select and `Space`/`Enter` to toggle direction, just like `htop`
 - **Block lag indicators** — Safe and Finalized block heights show their lag behind Latest in red `(-N)`
 - **Multi-node concurrency** — all nodes are queried in parallel
+- **Kubernetes auto-discovery** — when running inside a K8s cluster, automatically discovers and probes services that expose Ethereum RPC ports; the header shows a `K8S` badge
+- **Regex filter** — press `/` to interactively filter displayed nodes by URL using a regular expression
 
 ## Columns
 
@@ -82,7 +84,78 @@ rpcs:
 | `a`              | Sort ascending                              |
 | `d`              | Sort descending                             |
 | `1` – `9`        | Jump to column N directly                   |
+| `/`              | Enter filter mode (type regex to filter URLs)|
+| `Esc`            | Exit filter mode / clear active filter      |
 | `q` / `Ctrl+C`   | Quit                                        |
+
+## Kubernetes Auto-discovery
+
+When `eth-watch` is deployed inside a Kubernetes cluster (detected via the `KUBERNETES_SERVICE_HOST` environment variable), it automatically:
+
+1. Lists all `Service` objects across all namespaces via the K8s API
+2. Identifies candidate services whose **service name** matches `DISCOVERY_K8S_SERVICE_REGEX` **or** whose **port number** (as a string) matches `DISCOVERY_K8S_PORT_REGEX`
+3. Concurrently probes each candidate with an `eth_chainId` call to verify it is a live JSON-RPC node
+4. Adds confirmed live endpoints to the monitoring list
+
+The `⎈ K8S` badge is shown in the title bar when running in this mode. Any RPCs configured via `config.yaml` or the `RPCS` environment variable are merged with the discovered ones.
+
+### Discovery Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DISCOVERY_K8S_SERVICE_REGEX` | `.*(rpc\|geth\|reth\|erigon\|besu\|nethermind).*` | Regex matched against the service name |
+| `DISCOVERY_K8S_PORT_REGEX` | `.+45$` | Regex matched against the port number (e.g. `8545`, `9545`) |
+
+A service port is included as a candidate if **either** regex matches. Example override:
+
+```bash
+DISCOVERY_K8S_SERVICE_REGEX='.*(node|chain).*' \
+DISCOVERY_K8S_PORT_REGEX='^8545$' \
+./eth-watch
+```
+
+### Required RBAC Permissions
+
+`eth-watch` needs permission to list `Service` objects cluster-wide. Apply the following manifests:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eth-watch
+  namespace: default          # change to the namespace where eth-watch runs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: eth-watch
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: eth-watch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: eth-watch
+subjects:
+  - kind: ServiceAccount
+    name: eth-watch
+    namespace: default        # same namespace as above
+```
+
+Reference the service account in your Pod / Deployment:
+
+```yaml
+spec:
+  serviceAccountName: eth-watch
+```
+
+> **Namespace-scoped alternative** — if you only want to discover services in a single namespace, replace `ClusterRole` / `ClusterRoleBinding` with `Role` / `RoleBinding` scoped to that namespace.
 
 ## License
 

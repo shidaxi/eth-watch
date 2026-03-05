@@ -190,8 +190,37 @@ func queryNode(url string, timeout time.Duration) NodeInfo {
 	return info
 }
 
-type blockResult struct {
-	Number string `json:"number"`
+// probeNode sends a single eth_chainId request and returns true if the
+// endpoint responds with a valid chain ID. Much faster than queryNode.
+func probeNode(url string, timeout time.Duration) bool {
+	req := RPCRequest{JSONRPC: "2.0", Method: "eth_chainId", Params: []interface{}{}, ID: 1}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{}).Do(httpReq)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	var rpcResp RPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return false
+	}
+	return rpcResp.Error == nil && len(rpcResp.Result) > 2
+}
+
+type blockResult struct {	Number string `json:"number"`
 	Hash   string `json:"hash"`
 }
 
