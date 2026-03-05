@@ -19,7 +19,7 @@ func main() {
 	}
 
 	if len(cfg.RPCs) == 0 {
-		fmt.Fprintf(os.Stderr, "No RPCs configured in %s\n", *configPath)
+		fmt.Fprintf(os.Stderr, "No RPCs configured. Set via config file (%s) or RPCS env var.\n", *configPath)
 		os.Exit(1)
 	}
 
