@@ -31,6 +31,22 @@ A terminal dashboard for monitoring multiple Ethereum (or EVM-compatible) RPC no
 
 ## Installation
 
+### Quick install (curl)
+
+```bash
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"
+VERSION=$(curl -fsSL https://api.github.com/repos/shidaxi/eth-watch/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+sudo curl -fSL --progress-bar -o /usr/local/bin/eth-watch "https://github.com/shidaxi/eth-watch/releases/download/${VERSION}/eth-watch_${VERSION#v}_${OS}_${ARCH}"
+sudo chmod +x /usr/local/bin/eth-watch
+```
+
+### Homebrew
+
+```bash
+brew install shidaxi/tap/eth-watch
+```
+
 ### Pre-built binaries
 
 Download the latest binary for your platform from the [Releases](../../releases) page.
