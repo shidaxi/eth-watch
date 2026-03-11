@@ -115,18 +115,29 @@ When `eth-watch` is deployed inside a Kubernetes cluster (detected via the `KUBE
 
 The `⎈ K8S` badge is shown in the title bar when running in this mode. Any RPCs configured via `config.yaml` or the `RPCS` environment variable are merged with the discovered ones.
 
-### Discovery Environment Variables
+### Discovery Regex Patterns
 
-| Variable | Default | Description |
-|---|---|---|
-| `DISCOVERY_K8S_SERVICE_REGEX` | `.*(rpc\|geth\|reth\|erigon\|besu\|nethermind).*` | Regex matched against the service name |
-| `DISCOVERY_K8S_PORT_REGEX` | `.+45$` | Regex matched against the port number (e.g. `8545`, `9545`) |
+**Built-in defaults** (always active):
 
-A service port is included as a candidate if **either** regex matches. Example override:
+| Target | Pattern |
+|---|---|
+| Service name | `.*(rpc\|geth\|reth\|erigon\|besu\|nethermind).*` |
+| Port number | `.+45$` (e.g. `8545`, `9545`) |
+
+A service port is included as a candidate if **either** regex matches.
+
+**Extra patterns** — use these environment variables to add additional patterns that are OR'd with the defaults:
+
+| Variable | Description |
+|---|---|
+| `DISCOVERY_K8S_EXTRA_SERVICE_REGEX` | Additional regex OR'd with the default service name pattern |
+| `DISCOVERY_K8S_EXTRA_PORT_REGEX` | Additional regex OR'd with the default port pattern |
+
+Example — also discover services named `node` or `chain`, and port `9000`:
 
 ```bash
-DISCOVERY_K8S_SERVICE_REGEX='.*(node|chain).*' \
-DISCOVERY_K8S_PORT_REGEX='^8545$' \
+DISCOVERY_K8S_EXTRA_SERVICE_REGEX='.*(node|chain).*' \
+DISCOVERY_K8S_EXTRA_PORT_REGEX='^9000$' \
 ./eth-watch
 ```
 

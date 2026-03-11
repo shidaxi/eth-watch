@@ -23,17 +23,18 @@ func isInK8s() bool {
 	return os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 }
 
-// discoveryRegexes returns the compiled service-name and port regexes,
-// sourced from DISCOVERY_K8S_SERVICE_REGEX / DISCOVERY_K8S_PORT_REGEX env
-// vars with fallback to sensible defaults.
+// discoveryRegexes returns the compiled service-name and port regexes.
+// The defaults are always applied. If DISCOVERY_K8S_EXTRA_SERVICE_REGEX or
+// DISCOVERY_K8S_EXTRA_PORT_REGEX env vars are set, they are OR'd with the
+// defaults.
 func discoveryRegexes() (svcRe *regexp.Regexp, portRe *regexp.Regexp) {
-	svcPat := os.Getenv("DISCOVERY_K8S_SERVICE_REGEX")
-	if svcPat == "" {
-		svcPat = defaultServiceRegex
+	svcPat := defaultServiceRegex
+	if extra := os.Getenv("DISCOVERY_K8S_EXTRA_SERVICE_REGEX"); extra != "" {
+		svcPat = svcPat + "|" + extra
 	}
-	portPat := os.Getenv("DISCOVERY_K8S_PORT_REGEX")
-	if portPat == "" {
-		portPat = defaultPortRegex
+	portPat := defaultPortRegex
+	if extra := os.Getenv("DISCOVERY_K8S_EXTRA_PORT_REGEX"); extra != "" {
+		portPat = portPat + "|" + extra
 	}
 	svcRe = regexp.MustCompile(svcPat)
 	portRe = regexp.MustCompile(portPat)
