@@ -17,7 +17,7 @@ type Config struct {
 
 func loadConfig(path string) (*Config, error) {
 	cfg := &Config{
-		Interval: 12,
+		Interval: 2,
 	}
 
 	data, err := os.ReadFile(path)
@@ -50,7 +50,7 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	if cfg.Interval <= 0 {
-		cfg.Interval = 12
+		cfg.Interval = 2
 	}
 	return cfg, nil
 }

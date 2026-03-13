@@ -29,7 +29,7 @@ type column struct {
 }
 
 var columns = []column{
-	{name: "URL", width: 30},
+	{name: "URL", width: 44},
 	{name: "ChainID", width: 13},
 	{name: "Latest", width: 14},
 	{name: "Hash", width: 13},
@@ -37,7 +37,7 @@ var columns = []column{
 	{name: "Finalized", width: 14},
 	{name: "Syncing", width: 9},
 	{name: "Peers", width: 7},
-	{name: "Version", width: 28},
+	{name: "Version", width: 14},
 	{name: "Updated", width: 12},
 }
 
@@ -108,6 +108,7 @@ var (
 	k8sBadgeStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("27")).Padding(0, 1)
 	filterActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	filterLabelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	keyStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 )
 
 func newModel(rpcs []string, interval time.Duration, inK8s bool) model {
@@ -257,6 +258,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nextPage()
 		case "pgup":
 			m.prevPage()
+		case "r":
+			if len(m.rpcs) > 0 {
+				return m, fetchData(m.rpcs, m.interval)
+			}
 		case ",":
 			if m.dispMode == modeWide {
 				m.dispMode = modeSimple
@@ -534,7 +539,16 @@ func (m model) View() string {
 	if m.dispMode == modeSimple {
 		modeName = "simple"
 	}
-	title += helpStyle.Render(fmt.Sprintf("  ←/→ col  space asc/desc  a/d  1-9 col  pgup/pgdn page  / filter  , mode(%s)  esc×2/q quit", modeName))
+	title += "  " +
+		keyStyle.Render("[←/→]") + helpStyle.Render(" col  ") +
+		keyStyle.Render("[space]") + helpStyle.Render(" asc/desc  ") +
+		keyStyle.Render("[a/d]") + helpStyle.Render(" sort  ") +
+		keyStyle.Render("[1-9]") + helpStyle.Render(" col  ") +
+		keyStyle.Render("[pgup/pgdn]") + helpStyle.Render(" page  ") +
+		keyStyle.Render("[/]") + helpStyle.Render(" filter  ") +
+		keyStyle.Render("[r]") + helpStyle.Render(" refresh  ") +
+		keyStyle.Render("[,]") + helpStyle.Render(fmt.Sprintf(" mode(%s)  ", modeName)) +
+		keyStyle.Render("[esc×2/q]") + helpStyle.Render(" quit")
 	sb.WriteString(title + "\n")
 
 	// ── Status line ────────────────────────────────────────────────────────
